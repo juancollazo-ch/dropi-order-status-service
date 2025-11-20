@@ -1,0 +1,58 @@
+# Archivos de entorno
+.env
+*.env
+!.env.example
+
+# Archivos Markdown (documentación temporal)
+*.md
+
+# Scripts PowerShell
+*.ps1
+
+# Scripts Shell
+*.sh
+
+# Archivos JSON (excepto configuración de proyecto)
+*.json
+!go.mod
+!go.sum
+
+# Binarios y ejecutables
+main
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Archivos de test
+*.test
+*.out
+
+# Dependencias de Go
+vendor/
+go.work
+
+# IDEs y editores
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+webhooks-recibidos.json
+
+# Docker
+*.tar
+
+# Archivos temporales
+tmp/
+temp/
+*.tmp
+
+# Node modules (para webhook local)
+node_modules/
+package-lock.json
