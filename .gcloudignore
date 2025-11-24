@@ -1,0 +1,127 @@
+# ============================================
+# .gcloudignore - GCP Cloud Run Deployment
+# ============================================
+# Este archivo define qué NO se debe subir a Cloud Run
+# Solo se suben los archivos necesarios para que el servicio funcione
+
+# ============================================
+# ARCHIVOS DE CONFIGURACIÓN LOCAL
+# ============================================
+.env
+.env.*
+*.env
+.env.example
+
+# ============================================
+# DOCUMENTACIÓN (NO NECESARIA EN PRODUCCIÓN)
+# ============================================
+# Documentación en Markdown
+*.md
+!README.md
+!go.mod
+!go.sum
+
+# Archivos de documentación específicos
+INSTRUCCIONES.md
+DEPLOY_CLOUD_RUN.md
+DEPLOY_GCP.md
+PASOS_DESPLIEGUE.md
+API_INTEGRATION_GUIDE.md
+RESUMEN_CAMBIOS.md
+README_SISTEMA.md
+GUIA_COMPLETA_SISTEMA.md
+DIAGRAMA_FLUJO.md
+WEBHOOK_PAYLOAD_ESTRUCTURA.md
+WEBHOOK_RESUMEN.md
+CAMBIOS_SEGURIDAD_GCP.md
+GCP_CLOUD_RUN_SETUP.md
+RESUMEN_IMPLEMENTACION.md
+ANALISIS_ESTADO_PROYECTO.md
+INDICE_DOCUMENTACION.md
+
+# ============================================
+# SCRIPTS DE DEPLOYMENT Y UTILIDADES
+# ============================================
+*.sh
+deploy-cloudrun.sh
+update-webhook-url.sh
+setup-gcp.sh
+deploy.sh
+start-webhook-receiver.sh
+
+# ============================================
+# TESTS (NO NECESARIOS EN PRODUCCIÓN)
+# ============================================
+test/
+*_test.go
+**/*_test.go
+
+# ============================================
+# DIRECTORIOS DE DESARROLLO
+# ============================================
+# Webhook receiver local (solo para testing)
+webhook-receiver/
+
+# Directorio de especificaciones
+.kiro/
+specs/
+
+# ============================================
+# ARCHIVOS DE DESARROLLO
+# ============================================
+# Postman collections
+postman_collection.json
+*.postman_collection.json
+
+# Docker local
+docker-compose.yml
+Dockerfile.local
+
+# Archivos de testing local
+webhook-local.js
+
+# ============================================
+# CONTROL DE VERSIONES
+# ============================================
+.git/
+.gitignore
+.github/
+.gitattributes
+
+# ============================================
+# BUILD ARTIFACTS Y TEMPORALES
+# ============================================
+build/
+dist/
+*.log
+*.tmp
+.DS_Store
+*.swp
+*~
+*.bak
+*.backup
+
+# ============================================
+# IDE Y EDITORES
+# ============================================
+.vscode/
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+
+# ============================================
+# ARCHIVOS DE SISTEMA
+# ============================================
+Thumbs.db
+desktop.ini
+
+# ============================================
+# NOTA: LO QUE SÍ SE SUBE
+# ============================================
+# ✅ cmd/server.go (main del servicio)
+# ✅ internal/ (toda la lógica del servicio)
+# ✅ go.mod y go.sum (dependencias)
+# ✅ Dockerfile (si existe)
+# ✅ .dockerignore (si existe)

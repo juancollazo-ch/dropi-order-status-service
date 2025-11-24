@@ -1,253 +1,141 @@
 package webhook
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"os"
-	"time"
+    "bytes"
+    "context"
+    "encoding/json"
+    "fmt"
+    "net/http"
+    "os"
+    "strings"
+    "time"
 
-	"github.com/juancollazo-ch/dropi-order-status-service/internal/models"
+    "github.com/juancollazo-ch/dropi-order-status-service/internal/models"
+    "github.com/juancollazo-ch/dropi-order-status-service/internal/retry"
+    "go.uber.org/zap"
 )
 
 type Sender struct {
-	http       *http.Client
-	webhookURL string
+    httpClient *http.Client
+    baseURL    string
 }
 
-// WebhookPayload estructura simplificada para el webhook
-type WebhookPayload struct {
-	ID                  int64         `json:"id"`
-	Status              string        `json:"status"`
-	SupplierID          int64         `json:"supplier_id"`
-	Dir                 string        `json:"dir"`
-	Phone               string        `json:"phone"`
-	Email               *string       `json:"email"`
-	CreatedAt           string        `json:"created_at"`
-	Type                string        `json:"type"`
-	TotalOrder          string        `json:"total_order"`
-	Notes               *string       `json:"notes"`
-	Name                string        `json:"name"`
-	Surname             string        `json:"surname"`
-	Country             string        `json:"country"`
-	State               string        `json:"state"`
-	City                string        `json:"city"`
-	ZipCode             *string       `json:"zip_code"`
-	RateType            string        `json:"rate_type"`
-	ShippingCompany     string        `json:"shipping_company"`
-	ShippingGuide       string        `json:"shipping_guide"`
-	Sticker             string        `json:"sticker"`
-	SellerID            *int64        `json:"seller_id"`
-	ShopOrderID         string        `json:"shop_order_id"`
-	ShopID              int64         `json:"shop_id"`
-	ShopOrderNumber     int           `json:"shop_order_number"`
-	WarehouseID         int64         `json:"warehouse_id"`
-	DNIType             *string       `json:"dni_type"`
-	DNI                 *string       `json:"dni"`
-	Colonia             *string       `json:"colonia"`
-	ExternalID          *string       `json:"external_id"`
-	Shop                ShopInfo      `json:"shop"`
-	NovedadServientrega *string       `json:"novedad_servientrega"`
-	OrderDetails        []string      `json:"orderdetails"` // Array vacío
-	Warehouse           WarehouseInfo `json:"warehouse"`
-}
-
-type ShopInfo struct {
-	ID                    int64   `json:"id"`
-	UserID                int64   `json:"user_id"`
-	Name                  string  `json:"name"`
-	Email                 *string `json:"email"`
-	Phone                 *string `json:"phone"`
-	Type                  string  `json:"type"`
-	CreatedAt             string  `json:"created_at"`
-	UpdatedAt             string  `json:"updated_at"`
-	DeletedAt             *string `json:"deleted_at"`
-	ShopPassword          *string `json:"shop_password"`
-	ChangeStatusPendiente bool    `json:"change_status_pendiente"`
-	StatusPendiente       *string `json:"status_pendiente"`
-	SyncShippingGuide     bool    `json:"sync_shipping_guide"`
-	TypeID                int     `json:"type_id"`
-	Webhook               *string `json:"webhook"`
-}
-
-type WarehouseInfo struct {
-	ID   *int64  `json:"id"`
-	Name *string `json:"name"`
-}
-
+// NewSender construye un nuevo Webhook Sender leyendo la variable WEBHOOK_BASE_URL.
 func NewSender() *Sender {
-	webhookURL := os.Getenv("WEBHOOK_URL")
-	if webhookURL == "" {
-		webhookURL = "https://default-webhook.com/webhook"
-	}
+    base := os.Getenv("WEBHOOK_BASE_URL")
+    if base == "" {
+        base = "https://default-webhook.com" // fallback seguro
+    }
 
-	return &Sender{
-		http:       &http.Client{Timeout: 10 * time.Second},
-		webhookURL: webhookURL,
-	}
+    // Transport optimizado para webhooks
+    transport := &http.Transport{
+        MaxIdleConns:        50,
+        MaxIdleConnsPerHost: 50,
+        IdleConnTimeout:     90 * time.Second,
+    }
+
+    return &Sender{
+        httpClient: &http.Client{
+            Timeout:   10 * time.Second,
+            Transport: transport,
+        },
+        baseURL: strings.TrimRight(base, "/"),
+    }
 }
 
-// buildSimplifiedPayload crea el payload simplificado desde DropiOrder
-func buildSimplifiedPayload(order models.DropiOrder) WebhookPayload {
-	// Convertir SellerID de interface{} a *int64
-	var sellerID *int64
-	if order.SellerID != nil {
-		if val, ok := order.SellerID.(float64); ok {
-			id := int64(val)
-			sellerID = &id
-		}
-	}
+// BuildWebhookURL asegura que los slashes se manejen correctamente.
+func (s *Sender) BuildWebhookURL(suffix string) (string, error) {
+    if suffix == "" {
+        return "", fmt.Errorf("webhook suffix is required")
+    }
 
-	// Convertir Novedad de interface{} a *string
-	var novedad *string
-	if order.Novedad != nil {
-		if val, ok := order.Novedad.(string); ok {
-			novedad = &val
-		}
-	}
+    cleanSuffix := strings.Trim(suffix, "/")
+    full := s.baseURL + "/" + cleanSuffix
 
-	// Convertir ShopPassword de interface{} a *string
-	var shopPassword *string
-	if order.Shop.ShopPassword != nil {
-		if val, ok := order.Shop.ShopPassword.(string); ok {
-			shopPassword = &val
-		}
-	}
-
-	// Convertir StatusPendiente de interface{} a *string
-	var statusPendiente *string
-	if order.Shop.StatusPendiente != nil {
-		if val, ok := order.Shop.StatusPendiente.(string); ok {
-			statusPendiente = &val
-		}
-	}
-
-	// Convertir Webhook de interface{} a *string
-	var webhook *string
-	if order.Shop.Webhook != nil {
-		if val, ok := order.Shop.Webhook.(string); ok {
-			webhook = &val
-		}
-	}
-
-	// Convertir Warehouse ID y Name de interface{} a valores concretos
-	var warehouseID *int64
-	var warehouseName *string
-
-	if order.Warehouse.ID != nil {
-		if val, ok := order.Warehouse.ID.(float64); ok {
-			id := int64(val)
-			warehouseID = &id
-		}
-	}
-
-	if order.Warehouse.Name != nil {
-		if val, ok := order.Warehouse.Name.(string); ok {
-			warehouseName = &val
-		}
-	}
-
-	payload := WebhookPayload{
-		ID:                  order.ID,
-		Status:              order.Status,
-		SupplierID:          order.SupplierID,
-		Dir:                 order.Dir,
-		Phone:               order.Phone,
-		Email:               order.Email,
-		CreatedAt:           order.CreatedAt,
-		Type:                order.Type,
-		TotalOrder:          order.TotalOrder,
-		Notes:               order.Notes,
-		Name:                order.Name,
-		Surname:             order.Surname,
-		Country:             order.Country,
-		State:               order.State,
-		City:                order.City,
-		ZipCode:             order.ZipCode,
-		RateType:            order.RateType,
-		ShippingCompany:     order.ShippingCompany,
-		ShippingGuide:       order.ShippingGuide,
-		Sticker:             order.Sticker,
-		SellerID:            sellerID,
-		ShopOrderID:         order.ShopOrderID,
-		ShopID:              order.ShopID,
-		ShopOrderNumber:     int(order.ShopOrderNumber),
-		WarehouseID:         order.WarehouseID,
-		DNIType:             order.DNIType,
-		DNI:                 order.DNI,
-		Colonia:             order.Colonia,
-		ExternalID:          order.ExternalID,
-		NovedadServientrega: novedad,
-		OrderDetails:        []string{}, // Array vacío
-		Shop: ShopInfo{
-			ID:                    order.Shop.ID,
-			UserID:                order.Shop.UserID,
-			Name:                  order.Shop.Name,
-			Email:                 order.Shop.Email,
-			Phone:                 order.Shop.Phone,
-			Type:                  order.Shop.Type,
-			CreatedAt:             order.Shop.CreatedAt,
-			UpdatedAt:             order.Shop.UpdatedAt,
-			DeletedAt:             order.Shop.DeletedAt,
-			ShopPassword:          shopPassword,
-			ChangeStatusPendiente: order.Shop.ChangePendiente,
-			StatusPendiente:       statusPendiente,
-			SyncShippingGuide:     order.Shop.SyncGuide,
-			TypeID:                int(order.Shop.TypeID),
-			Webhook:               webhook,
-		},
-		Warehouse: WarehouseInfo{
-			ID:   warehouseID,
-			Name: warehouseName,
-		},
-	}
-
-	return payload
+    return full, nil
 }
 
-func (s *Sender) Send(order models.DropiOrder) error {
-	// Crear payload simplificado
-	simplifiedPayload := buildSimplifiedPayload(order)
+// SendWebhook envía un webhook a un endpoint dinámico.
+func (s *Sender) SendWebhook(order models.DropiOrder, webhookSuffix string) error {
+    url, err := s.BuildWebhookURL(webhookSuffix)
+    if err != nil {
+        return err
+    }
 
-	payload, err := json.Marshal(simplifiedPayload)
-	if err != nil {
-		return fmt.Errorf("error marshaling order: %w", err)
-	}
+    // Usar el método del modelo para convertir
+    payload := order.ToWebhookPayload()
 
-	// Retry logic: 3 intentos con backoff exponencial
-	maxRetries := 3
-	var lastErr error
+    body, err := json.Marshal(payload)
+    if err != nil {
+        return fmt.Errorf("error marshaling webhook payload: %w", err)
+    }
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		req, err := http.NewRequest(http.MethodPost, s.webhookURL, bytes.NewBuffer(payload))
-		if err != nil {
-			return fmt.Errorf("error creating request: %w", err)
-		}
+    zap.L().Info("sending webhook",
+        zap.String("url", url),
+        zap.Int64("order_id", order.ID),
+        zap.String("status", order.Status),
+    )
 
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Retry-Attempt", fmt.Sprintf("%d", attempt))
+    ctx := context.Background()
+    attemptCount := 0
 
-		resp, err := s.http.Do(req)
-		if err != nil {
-			lastErr = fmt.Errorf("error sending webhook (attempt %d/%d): %w", attempt, maxRetries, err)
-			if attempt < maxRetries {
-				time.Sleep(time.Duration(attempt) * time.Second) // backoff: 1s, 2s, 3s
-				continue
-			}
-			return lastErr
-		}
-		defer resp.Body.Close()
+    err = retry.WithRetry(ctx, 3, time.Second, func() error {
+        attemptCount++
 
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil // Éxito
-		}
+        zap.L().Info("webhook attempt",
+            zap.String("url", url),
+            zap.Int64("order_id", order.ID),
+            zap.Int("attempt", attemptCount),
+        )
 
-		lastErr = fmt.Errorf("webhook failed with status: %d (attempt %d/%d)", resp.StatusCode, attempt, maxRetries)
-		if attempt < maxRetries {
-			time.Sleep(time.Duration(attempt) * time.Second)
-		}
-	}
+        req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
+        if err != nil {
+            return fmt.Errorf("error creating webhook request: %w", err)
+        }
 
-	return lastErr
+        req.Header.Set("Content-Type", "application/json")
+        req.Header.Set("X-Retry-Attempt", fmt.Sprintf("%d", attemptCount))
+
+        resp, err := s.httpClient.Do(req)
+        if err != nil {
+            zap.L().Warn("webhook request failed",
+                zap.String("url", url),
+                zap.Int64("order_id", order.ID),
+                zap.Int("attempt", attemptCount),
+                zap.Error(err),
+            )
+            return err
+        }
+        defer resp.Body.Close()
+
+        if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+            zap.L().Info("webhook sent successfully",
+                zap.String("url", url),
+                zap.Int64("order_id", order.ID),
+                zap.Int("status_code", resp.StatusCode),
+                zap.Int("attempt", attemptCount),
+            )
+            return nil
+        }
+
+        err = fmt.Errorf("webhook failed with status %d", resp.StatusCode)
+        zap.L().Warn("webhook failed",
+            zap.String("url", url),
+            zap.Int64("order_id", order.ID),
+            zap.Int("status_code", resp.StatusCode),
+            zap.Int("attempt", attemptCount),
+        )
+        return err
+    })
+
+    if err != nil {
+        zap.L().Error("webhook failed after all retries",
+            zap.String("url", url),
+            zap.Int64("order_id", order.ID),
+            zap.Int("total_attempts", attemptCount),
+            zap.Error(err),
+        )
+    }
+
+    return err
 }

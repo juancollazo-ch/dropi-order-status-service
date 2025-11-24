@@ -9,11 +9,12 @@ import (
 
 // Result describe el resultado de la comparación
 type Result struct {
-	Changed     bool   // true si hubo cambio
-	OldStatus   string // status del penúltimo item
-	NewStatus   string // status del último item
-	OrderID     int64  // id de la orden
-	HistorySize int    // total de items en el history
+	Changed      bool     // true si hubo cambio
+	OldStatus    string   // status del penúltimo item
+	NewStatus    string   // status del último item
+	OrderID      int64    // id de la orden
+	ProductNames []string // nombres de los productos en la orden
+	HistorySize  int      // total de items en el history
 }
 
 // CompareOrderStatus evalúa si hubo cambio entre el último y penúltimo estado
@@ -61,10 +62,11 @@ func CompareOrderStatus(order *models.DropiOrder, logger *slog.Logger) (Result, 
 	}
 
 	return Result{
-		Changed:     changed,
-		OldStatus:   prev.Status,
-		NewStatus:   last.Status,
-		OrderID:     order.ID,
-		HistorySize: hSize,
+		Changed:      changed,
+		OldStatus:    prev.Status,
+		NewStatus:    last.Status,
+		OrderID:      order.ID,
+		ProductNames: order.GetProductNames(),
+		HistorySize:  hSize,
 	}, nil
 }

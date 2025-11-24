@@ -5,37 +5,110 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/models"
+	"github.com/sony/gobreaker"
+	"go.uber.org/zap"
 )
 
 type DropiClient struct {
-	http *http.Client
-	base string
+	http           *http.Client
+	baseURL        string
+	circuitBreaker *gobreaker.CircuitBreaker
 }
 
+// NewDropiClient lee la URL base desde variable de entorno
 func NewDropiClient() (*DropiClient, error) {
-	base := os.Getenv("DROPI_BASE_URL")
-	if base == "" {
-		return nil, errors.New("DROPI_BASE_URL is required")
+	baseURL := os.Getenv("DROPI_API_BASE_URL")
+	if baseURL == "" {
+		legacyURL := os.Getenv("DROPI_BASE_URL")
+		if legacyURL != "" {
+			zap.L().Warn("Using legacy DROPI_BASE_URL, please migrate to DROPI_API_BASE_URL")
+			baseURL = extractBaseURL(legacyURL)
+		} else {
+			return nil, errors.New("DROPI_API_BASE_URL environment variable is required")
+		}
 	}
 
+	// Limpiar trailing slash
+	baseURL = strings.TrimRight(baseURL, "/")
+
+	// Transport optimizado
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+	}
+
+	// Cliente HTTP
+	client := &http.Client{
+		Timeout:   12 * time.Second,
+		Transport: transport,
+	}
+
+	// Circuit Breaker
+	cb := gobreaker.NewCircuitBreaker(gobreaker.Settings{
+		Name:        "dropi-api",
+		MaxRequests: 3,
+		Interval:    30 * time.Second,
+		Timeout:     60 * time.Second,
+	})
+
 	return &DropiClient{
-		http: &http.Client{Timeout: 30 * time.Second}, // Aumentado para manejar respuestas grandes
-		base: base,
+		http:           client,
+		baseURL:        baseURL,
+		circuitBreaker: cb,
 	}, nil
 }
 
-func (c *DropiClient) FetchOrders(
+// extractBaseURL extrae "https://api.dropi" de "https://api.dropi.co/integrations/..."
+func extractBaseURL(fullURL string) string {
+	if idx := strings.Index(fullURL, "api.dropi"); idx != -1 {
+		start := fullURL[:idx+9] // "https://api.dropi"
+		if dotIdx := strings.Index(fullURL[idx+9:], "/"); dotIdx != -1 {
+			return start
+		}
+		return start
+	}
+	return fullURL
+}
+
+// BuildDropiURL construye la URL completa: {base}.{suffix}/integrations/orders/myorders
+func (c *DropiClient) BuildDropiURL(countrySuffix string) (string, error) {
+	if countrySuffix == "" {
+		return "", errors.New("dropi_country_suffix is required")
+	}
+
+	if len(countrySuffix) < 2 {
+		return "", fmt.Errorf("invalid country suffix '%s'", countrySuffix)
+	}
+
+	return fmt.Sprintf(
+		"%s.%s/integrations/orders/myorders",
+		c.baseURL,
+		countrySuffix,
+	), nil
+}
+
+func (c *DropiClient) doFetchOrders(
 	ctx context.Context,
 	apiKey string,
 	date string,
 	limit int,
+	countrySuffix string,
 ) ([]models.DropiOrder, error) {
+	// Verificar si el context ya expiró
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("context cancelled before request: %w", ctx.Err())
+	default:
+	}
+
+	start := time.Now()
 
 	if apiKey == "" {
 		return nil, errors.New("api_key required")
@@ -43,26 +116,41 @@ func (c *DropiClient) FetchOrders(
 	if date == "" {
 		return nil, errors.New("date is required")
 	}
+	if countrySuffix == "" {
+		return nil, errors.New("dropi_country_suffix is required")
+	}
 	if limit <= 0 {
 		limit = 1
 	}
 
-	// Build URL - Construir exactamente como Postman (con %20 para espacios)
-	// Postman URL-encode los espacios como %20
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base, nil)
+	// Construir URL dinámica
+	url, err := c.BuildDropiURL(countrySuffix)
+	if err != nil {
+		return nil, fmt.Errorf("error building Dropi URL: %w", err)
+	}
+
+	// Crear request
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("error building request: %w", err)
 	}
 
-	// Establecer RawQuery con espacios URL-encoded como %20 (igual que Postman)
-	req.URL.RawQuery = fmt.Sprintf("from=%s&result_number=%d&filter_date_by=%s",
-		date, limit, "FECHA%20DE%20CAMBIO%20DE%20ESTATUS")
+	// Query params
+	req.URL.RawQuery = fmt.Sprintf(
+		"from=%s&result_number=%d&filter_date_by=%s",
+		date, limit, "FECHA%20DE%20CAMBIO%20DE%20ESTATUS",
+	)
 
-	slog.Info("DEBUG Dropi API", "url", req.URL.String(), "rawQuery", req.URL.RawQuery)
+	zap.L().Info("calling dropi",
+		zap.String("url", req.URL.String()),
+		zap.String("country_suffix", countrySuffix),
+		zap.String("date", date),
+		zap.Int("limit", limit),
+	)
 
-	// Headers para Dropi
+	// Headers
 	req.Header.Set("dropi-integration-key", apiKey)
-	req.Header.Set("User-Agent", "PostmanRuntime/7.26.8") // Simular Postman
+	req.Header.Set("User-Agent", "PostmanRuntime/7.26.8")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -70,43 +158,135 @@ func (c *DropiClient) FetchOrders(
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("dropi error: status %d", resp.StatusCode)
+	// Manejo específico de códigos de error
+	switch resp.StatusCode {
+	case 429:
+		// Rate limiting - error temporal
+		retryAfter := resp.Header.Get("Retry-After")
+		if retryAfter != "" {
+			zap.L().Warn("rate limited by Dropi",
+				zap.String("retry_after", retryAfter),
+				zap.String("country_suffix", countrySuffix),
+			)
+			return nil, fmt.Errorf("rate limited: retry after %s seconds", retryAfter)
+		}
+		return nil, fmt.Errorf("rate limited by Dropi API")
+
+	case 401, 403:
+		// Error de autenticación - error permanente
+		zap.L().Error("authentication failed",
+			zap.Int("status_code", resp.StatusCode),
+		)
+		return nil, fmt.Errorf("authentication error: invalid API key (status %d)", resp.StatusCode)
+
+	case 503:
+		// Service unavailable - error temporal
+		zap.L().Warn("dropi service unavailable",
+			zap.Int("status_code", resp.StatusCode),
+		)
+		return nil, fmt.Errorf("dropi service temporarily unavailable")
+
+	case 200, 201, 204:
+		// Success - continuar
+	default:
+		if resp.StatusCode >= 400 {
+			return nil, fmt.Errorf("dropi error: status %d", resp.StatusCode)
+		}
 	}
 
-	// Leer el body completo para debugging
-	var rawResponse map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&rawResponse); err != nil {
+	var apiResponse models.DropiAPIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResponse); err != nil {
 		return nil, fmt.Errorf("invalid JSON from Dropi: %w", err)
 	}
 
-	slog.Info("DEBUG Dropi Response", "keys", getKeys(rawResponse))
+	zap.L().Info("dropi response received",
+		zap.Int("status_code", resp.StatusCode),
+		zap.Int("orders_count", len(apiResponse.Objects)),
+		zap.Int("total_count", apiResponse.Count),
+		zap.Duration("duration", time.Since(start)),
+	)
 
-	// Dropi puede devolver un objeto con "objects" o directamente un array
-	// Intentar extraer el array de órdenes
-	var orders []models.DropiOrder
-
-	// Si hay un campo "objects", usar ese
-	if objectsField, ok := rawResponse["objects"]; ok {
-		objectsJSON, _ := json.Marshal(objectsField)
-		if err := json.Unmarshal(objectsJSON, &orders); err != nil {
-			return nil, fmt.Errorf("error parsing objects field: %w", err)
-		}
-	} else {
-		// Si no, intentar parsear como array directamente
-		responseJSON, _ := json.Marshal(rawResponse)
-		if err := json.Unmarshal(responseJSON, &orders); err != nil {
-			return nil, fmt.Errorf("error parsing response as array: %w", err)
-		}
-	}
-
-	return orders, nil
+	return apiResponse.Objects, nil
 }
 
-func getKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+func (c *DropiClient) FetchOrders(
+	ctx context.Context,
+	apiKey string,
+	date string,
+	limit int,
+	countrySuffix string,
+) ([]models.DropiOrder, error) {
+	result, err := c.circuitBreaker.Execute(func() (interface{}, error) {
+		return c.doFetchOrders(ctx, apiKey, date, limit, countrySuffix)
+	})
+
+	if err != nil {
+		return nil, err
 	}
-	return keys
+
+	return result.([]models.DropiOrder), nil
 }
+
+// FetchAllOrders obtiene todas las órdenes usando paginación automática
+// Útil cuando hay más de 50 órdenes en una fecha
+func (c *DropiClient) FetchAllOrders(
+	ctx context.Context,
+	apiKey string,
+	date string,
+	countrySuffix string,
+) ([]models.DropiOrder, error) {
+	const pageSize = 50
+	var allOrders []models.DropiOrder
+	page := 1
+	maxPages := 10 // Límite de seguridad para evitar loops infinitos
+
+	for page <= maxPages {
+		// Verificar timeout
+		select {
+		case <-ctx.Done():
+			zap.L().Warn("pagination stopped due to timeout",
+				zap.Int("pages_fetched", page-1),
+				zap.Int("total_orders", len(allOrders)),
+			)
+			return allOrders, nil // Retornar lo que tenemos hasta ahora
+		default:
+		}
+
+		orders, err := c.FetchOrders(ctx, apiKey, date, pageSize, countrySuffix)
+		if err != nil {
+			// Si es la primera página, retornar error
+			if page == 1 {
+				return nil, err
+			}
+			// Si es una página posterior, retornar lo que tenemos
+			zap.L().Warn("pagination stopped due to error",
+				zap.Int("page", page),
+				zap.Error(err),
+			)
+			return allOrders, nil
+		}
+
+		allOrders = append(allOrders, orders...)
+
+		// Si recibimos menos de pageSize, no hay más páginas
+		if len(orders) < pageSize {
+			zap.L().Info("pagination completed",
+				zap.Int("total_pages", page),
+				zap.Int("total_orders", len(allOrders)),
+			)
+			break
+		}
+
+		page++
+	}
+
+	if page > maxPages {
+		zap.L().Warn("pagination limit reached",
+			zap.Int("max_pages", maxPages),
+			zap.Int("total_orders", len(allOrders)),
+		)
+	}
+
+	return allOrders, nil
+}
+
