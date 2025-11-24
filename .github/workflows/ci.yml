@@ -28,7 +28,8 @@ jobs:
       - name: Build binary (sanity check)
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-          go build -o main .
+          go build -o main ./cmd/server.go
+
 
       - name: Build Docker image
         run: docker build -t whatsapp-template-api:ci .
