@@ -15,7 +15,7 @@ type RequestValidator struct {
 func NewRequestValidator() *RequestValidator {
 	return &RequestValidator{
 		// Accepts: "co", "mx", "cl" (2 letters) or "py.com" (2 letters + dot + 2-3 letters)
-		countrySuffixRegex: regexp.MustCompile(`^[a-z]{2}(\.[a-z]{2,3})?$`),
+		countrySuffixRegex: regexp.MustCompile(`^[a-z]{2,3}\.[a-z]{2,3}$`),
 	}
 }
 

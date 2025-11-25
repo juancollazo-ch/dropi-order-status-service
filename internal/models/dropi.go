@@ -1,26 +1,26 @@
 package models
 
 type DropiOrder struct {
-	ID              int64    `json:"id"`
-	Status          string   `json:"status"`
-	SupplierID      int64    `json:"supplier_id"`
-	Dir             string   `json:"dir"`
-	Phone           string   `json:"phone"`
-	Email           *string  `json:"client_email"`
-	CreatedAt       string   `json:"created_at"`
-	Type            string   `json:"type"`
-	TotalOrder      string   `json:"total_order"`
-	Notes           *string  `json:"notes"`
-	Name            string   `json:"name"`
-	Surname         string   `json:"surname"`
-	Country         string   `json:"country"`
-	State           string   `json:"state"`
-	City            string   `json:"city"`
-	ZipCode         *string  `json:"zip_code"`
-	RateType        string   `json:"rate_type"`
-	ShippingCompany string   `json:"shipping_company"`
-	ShippingGuide   string   `json:"shipping_guide"`
-	Sticker         *string  `json:"sticker"`
+	ID              int64   `json:"id"`
+	Status          string  `json:"status"`
+	SupplierID      int64   `json:"supplier_id"`
+	Dir             string  `json:"dir"`
+	Phone           string  `json:"phone"`
+	Email           *string `json:"client_email"`
+	CreatedAt       string  `json:"created_at"`
+	Type            string  `json:"type"`
+	TotalOrder      string  `json:"total_order"`
+	Notes           *string `json:"notes"`
+	Name            string  `json:"name"`
+	Surname         string  `json:"surname"`
+	Country         string  `json:"country"`
+	State           string  `json:"state"`
+	City            string  `json:"city"`
+	ZipCode         *string `json:"zip_code"`
+	RateType        string  `json:"rate_type"`
+	ShippingCompany string  `json:"shipping_company"`
+	ShippingGuide   string  `json:"shipping_guide"`
+	Sticker         *string `json:"sticker"`
 
 	// 🔥 REFACTORIZADO (antes interface{})
 	SellerID *int64 `json:"seller_id"`
@@ -36,13 +36,10 @@ type DropiOrder struct {
 
 	Shop ShopInfo `json:"shop"`
 
-	// 🔥 REFACTORIZADO (antes interface{})
 	Novedad *string `json:"novedad_servientrega"`
 
-	// 🔥 REFACTORIZADO (antes []interface{})
 	OrderDetails []OrderDetail `json:"orderdetails"`
 
-	// warehouse también refactorizado
 	Warehouse WarehouseInfo `json:"warehouse"`
 
 	History []HistoryItem `json:"history"`

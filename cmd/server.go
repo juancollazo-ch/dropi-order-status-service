@@ -14,11 +14,10 @@ import (
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/handlers"
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/service"
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/webhook"
-	"github.com/juancollazo-ch/dropi-order-status-service/internal/worker"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
-//
 // -------------------------------------------------------
 // Context Keys (tipado seguro)
 // -------------------------------------------------------
@@ -26,13 +25,43 @@ type contextKey string
 
 const traceIDKey contextKey = "trace_id"
 
-//
+// -------------------------------------------------------
+// Convertir niveles de Zap a severidad de GCP Cloud Logging
+// -------------------------------------------------------
+func zapLevelToGCPSeverity(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
+	switch level {
+	case zapcore.DebugLevel:
+		enc.AppendString("DEBUG")
+	case zapcore.InfoLevel:
+		enc.AppendString("INFO")
+	case zapcore.WarnLevel:
+		enc.AppendString("WARNING")
+	case zapcore.ErrorLevel:
+		enc.AppendString("ERROR")
+	case zapcore.DPanicLevel, zapcore.PanicLevel:
+		enc.AppendString("CRITICAL")
+	case zapcore.FatalLevel:
+		enc.AppendString("EMERGENCY")
+	default:
+		enc.AppendString("DEFAULT")
+	}
+}
+
 // -------------------------------------------------------
 // MAIN: inicializa servidor, workers y dependencias
 // -------------------------------------------------------
 func main() {
-	// Inicializar Zap Logger
-	logger, err := zap.NewProduction()
+	// Inicializar Zap Logger con formato compatible con GCP Cloud Logging
+	config := zap.NewProductionConfig()
+
+	// Configurar para Cloud Logging (JSON estructurado)
+	config.EncoderConfig.MessageKey = "message"
+	config.EncoderConfig.LevelKey = "severity"
+	config.EncoderConfig.TimeKey = "timestamp"
+	config.EncoderConfig.EncodeLevel = zapLevelToGCPSeverity
+	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+
+	logger, err := config.Build()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
 		os.Exit(1)
@@ -58,13 +87,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	sender := webhook.NewSender()
+	webhookSender := webhook.NewSender()
 
-	workerPool := worker.NewWorkerPool(sender, 50) // 50 workers concurrentes
-	workerCtx := context.Background()
-	workerPool.Start(workerCtx)
-
-	orderService := service.NewOrderService(dropiClient, workerPool)
+	orderService := service.NewOrderService(dropiClient, webhookSender)
 	processHandler := handlers.NewProcessHandler(orderService)
 
 	//
@@ -113,7 +138,6 @@ func main() {
 	}
 }
 
-//
 // -------------------------------------------------------
 // MIDDLEWARE: Logging con Trace ID compatible con GCP
 // -------------------------------------------------------
@@ -121,38 +145,75 @@ func withLogging(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		// Trace ID compatible con Cloud Run / Cloud Logging
-		traceID := r.Header.Get("X-Cloud-Trace-Context")
+		// Extraer Trace ID de Cloud Run
+		traceHeader := r.Header.Get("X-Cloud-Trace-Context")
+		var traceID string
+		if traceHeader != "" {
+			// Formato: TRACE_ID/SPAN_ID;o=TRACE_TRUE
+			// Solo necesitamos TRACE_ID
+			if idx := len(traceHeader); idx > 0 {
+				if slashIdx := 0; slashIdx < idx {
+					for i, c := range traceHeader {
+						if c == '/' {
+							slashIdx = i
+							break
+						}
+					}
+					if slashIdx > 0 {
+						traceID = traceHeader[:slashIdx]
+					} else {
+						traceID = traceHeader
+					}
+				}
+			}
+		}
 		if traceID == "" {
 			traceID = fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
+		}
+
+		// Obtener Project ID para el formato completo de trace
+		projectID := os.Getenv("GCP_PROJECT")
+		if projectID == "" {
+			projectID = os.Getenv("GOOGLE_CLOUD_PROJECT")
 		}
 
 		// Guardar traceID en contexto
 		ctx := context.WithValue(r.Context(), traceIDKey, traceID)
 
-		zap.L().Info("Request started",
-			zap.String("trace_id", traceID),
-			zap.String("method", r.Method),
-			zap.String("path", r.URL.Path),
-			zap.String("ip", r.RemoteAddr),
-			zap.String("user_agent", r.UserAgent()),
-		)
+		// Log con formato compatible con Cloud Logging
+		logFields := []zap.Field{
+			zap.String("httpRequest.requestMethod", r.Method),
+			zap.String("httpRequest.requestUrl", r.URL.Path),
+			zap.String("httpRequest.remoteIp", r.RemoteAddr),
+			zap.String("httpRequest.userAgent", r.UserAgent()),
+		}
+
+		// Agregar trace en formato GCP si tenemos projectID
+		if projectID != "" && traceID != "" {
+			logFields = append(logFields, zap.String("logging.googleapis.com/trace", fmt.Sprintf("projects/%s/traces/%s", projectID, traceID)))
+		}
+
+		zap.L().Info("Request started", logFields...)
 
 		next(w, r.WithContext(ctx))
 
 		duration := time.Since(start)
 
-		zap.L().Info("Request completed",
-			zap.String("trace_id", traceID),
-			zap.String("method", r.Method),
-			zap.String("path", r.URL.Path),
-			zap.Int64("duration_ms", duration.Milliseconds()),
-			zap.Float64("duration_seconds", duration.Seconds()),
-		)
+		completedFields := []zap.Field{
+			zap.String("httpRequest.requestMethod", r.Method),
+			zap.String("httpRequest.requestUrl", r.URL.Path),
+			zap.Int64("httpRequest.latency.milliseconds", duration.Milliseconds()),
+			zap.Float64("httpRequest.latency.seconds", duration.Seconds()),
+		}
+
+		if projectID != "" && traceID != "" {
+			completedFields = append(completedFields, zap.String("logging.googleapis.com/trace", fmt.Sprintf("projects/%s/traces/%s", projectID, traceID)))
+		}
+
+		zap.L().Info("Request completed", completedFields...)
 	}
 }
 
-//
 // -------------------------------------------------------
 // HEALTH CHECK
 // -------------------------------------------------------
@@ -172,4 +233,3 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
-

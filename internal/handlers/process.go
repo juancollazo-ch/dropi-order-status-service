@@ -30,7 +30,9 @@ func (h *ProcessHandler) ProcessOrders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	// Timeout de 180s (3 minutos) para manejar el peor caso:
+	// 150 órdenes con cambios = 150 webhooks con posibles reintentos
+	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 	defer cancel()
 
 	var req models.ProcessRequest
@@ -76,6 +78,7 @@ func (h *ProcessHandler) ProcessOrders(w http.ResponseWriter, r *http.Request) {
 		req.Date,
 		req.DropiCountrySuffix,
 		req.WebhookSuffix,
+		req.DateUtil,
 	)
 
 	if err != nil {

@@ -4,34 +4,39 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/api"
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/compare"
-	"github.com/juancollazo-ch/dropi-order-status-service/internal/worker"
+	"github.com/juancollazo-ch/dropi-order-status-service/internal/models"
+	"github.com/juancollazo-ch/dropi-order-status-service/internal/webhook"
+	"go.uber.org/zap"
 )
 
 type OrderService struct {
-	client     *api.DropiClient
-	workerPool *worker.WorkerPool
+	client         *api.DropiClient
+	webhookSender  *webhook.Sender
+	maxConcurrency int // Máximo de webhooks concurrentes
 }
 
-func NewOrderService(client *api.DropiClient, pool *worker.WorkerPool) *OrderService {
+func NewOrderService(client *api.DropiClient, sender *webhook.Sender) *OrderService {
 	return &OrderService{
-		client:     client,
-		workerPool: pool,
+		client:         client,
+		webhookSender:  sender,
+		maxConcurrency: 5, // Reducido a 5 para evitar rate limiting (429)
 	}
 }
 
 type ProcessResult struct {
-	TotalOrders      int           `json:"total_orders"`
-	OrdersProcessed  int           `json:"orders_processed"`
-	ChangesDetected  int           `json:"changes_detected"`
-	WebhooksQueued   int           `json:"webhooks_queued"`   // Webhooks encolados
-	WebhooksPending  int           `json:"webhooks_pending"`  // Webhooks aún procesándose
-	OrdersSkipped    int           `json:"orders_skipped"`
-	Errors           []string      `json:"errors,omitempty"`
-	Details          []OrderStatus `json:"details"`
-	PartialTimeout   bool          `json:"partial_timeout,omitempty"` // Indica si hubo timeout parcial
+	TotalOrders     int           `json:"total_orders"`
+	OrdersProcessed int           `json:"orders_processed"`
+	ChangesDetected int           `json:"changes_detected"`
+	WebhooksQueued  int           `json:"webhooks_queued"`
+	WebhooksPending int           `json:"webhooks_pending"`
+	OrdersSkipped   int           `json:"orders_skipped"`
+	Errors          []string      `json:"errors,omitempty"`
+	Details         []OrderStatus `json:"details"`
+	PartialTimeout  bool          `json:"partial_timeout,omitempty"`
 }
 
 type OrderStatus struct {
@@ -51,9 +56,8 @@ func (s *OrderService) HandleOrderRequest(
 	date string,
 	countrySuffix string,
 	webhookSuffix string,
+	dateUtil string,
 ) (*ProcessResult, error) {
-
-	const resultNumber = 50 // máximo permitido
 
 	logger := slog.With(
 		"country_suffix", countrySuffix,
@@ -62,7 +66,7 @@ func (s *OrderService) HandleOrderRequest(
 
 	// 1) Consultar Dropi con paginación automática
 	// Esto maneja automáticamente el caso de más de 50 órdenes
-	orders, err := s.client.FetchAllOrders(ctx, apiKey, date, countrySuffix)
+	orders, err := s.client.FetchAllOrders(ctx, apiKey, date, countrySuffix, dateUtil)
 	if err != nil {
 		logger.Error("error fetching orders", "error", err)
 		return nil, err
@@ -85,6 +89,11 @@ func (s *OrderService) HandleOrderRequest(
 		logger.Info("no orders found for this date", "date", date)
 		return result, nil
 	}
+
+	// Preparar para procesamiento concurrente de webhooks
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, s.maxConcurrency)
+	webhookErrors := make(chan error, len(orders))
 
 	for i := range orders {
 		// Verificar si el context expiró antes de procesar cada orden
@@ -130,15 +139,77 @@ func (s *OrderService) HandleOrderRequest(
 		}
 		result.Details = append(result.Details, statusInfo)
 
-		// 3) Si cambió → Encolar webhook (ACTUALIZADO)
+		// 3) Si cambió → Enviar webhook de forma concurrente
 		if compareResult.Changed {
 			result.ChangesDetected++
-
-			s.workerPool.Enqueue(*order, webhookSuffix)
 			result.WebhooksQueued++
-			result.WebhooksPending++
+
+			wg.Add(1)
+			go func(order models.DropiOrder, suffix string, orderID int64) {
+				defer wg.Done()
+
+				// Adquirir semáforo (limita concurrencia)
+				semaphore <- struct{}{}
+				defer func() { <-semaphore }()
+
+				zap.L().Info("sending webhook",
+					zap.Int64("order_id", orderID),
+					zap.String("webhook_suffix", suffix),
+				)
+
+				if err := s.webhookSender.SendWebhook(order, suffix); err != nil {
+					zap.L().Error("webhook failed",
+						zap.Int64("order_id", orderID),
+						zap.Error(err),
+					)
+					webhookErrors <- fmt.Errorf("order %d: %w", orderID, err)
+				} else {
+					zap.L().Info("webhook sent successfully",
+						zap.Int64("order_id", orderID),
+					)
+				}
+			}(*order, webhookSuffix, order.ID)
 		}
 	}
+
+	// Esperar a que todos los webhooks terminen
+	if result.WebhooksQueued > 0 {
+		zap.L().Info("waiting for webhooks to complete",
+			zap.Int("webhooks_queued", result.WebhooksQueued),
+			zap.Int("max_concurrency", s.maxConcurrency),
+		)
+
+		// Log warning si hay muchos webhooks (caso pesado)
+		if result.WebhooksQueued > 100 {
+			zap.L().Warn("heavy load: processing many webhooks",
+				zap.Int("webhook_count", result.WebhooksQueued),
+				zap.Int("estimated_time_seconds", (result.WebhooksQueued/s.maxConcurrency)*3),
+			)
+		}
+
+		wg.Wait()
+
+		zap.L().Info("all webhooks completed",
+			zap.Int("total_webhooks", result.WebhooksQueued),
+		)
+	}
+	close(webhookErrors)
+
+	// Recolectar errores de webhooks
+	webhookErrorCount := 0
+	for err := range webhookErrors {
+		webhookErrorCount++
+		result.Errors = append(result.Errors, err.Error())
+	}
+
+	if webhookErrorCount > 0 {
+		zap.L().Warn("some webhooks failed",
+			zap.Int("failed_count", webhookErrorCount),
+			zap.Int("total_webhooks", result.WebhooksQueued),
+		)
+	}
+
+	result.WebhooksPending = 0 // Todos completados
 
 	return result, nil
 }

@@ -100,6 +100,7 @@ func (c *DropiClient) doFetchOrders(
 	date string,
 	limit int,
 	countrySuffix string,
+	dateUtil string,
 ) ([]models.DropiOrder, error) {
 	// Verificar si el context ya expiró
 	select {
@@ -136,10 +137,18 @@ func (c *DropiClient) doFetchOrders(
 	}
 
 	// Query params
-	req.URL.RawQuery = fmt.Sprintf(
+	// Query params base
+	queryParams := fmt.Sprintf(
 		"from=%s&result_number=%d&filter_date_by=%s",
 		date, limit, "FECHA%20DE%20CAMBIO%20DE%20ESTATUS",
 	)
+
+	// Agregar date_util si está presente
+	if dateUtil != "" {
+		queryParams += fmt.Sprintf("&until=%s", dateUtil)
+	}
+
+	req.URL.RawQuery = queryParams
 
 	zap.L().Info("calling dropi",
 		zap.String("url", req.URL.String()),
@@ -215,9 +224,10 @@ func (c *DropiClient) FetchOrders(
 	date string,
 	limit int,
 	countrySuffix string,
+	dateUtil string,
 ) ([]models.DropiOrder, error) {
 	result, err := c.circuitBreaker.Execute(func() (interface{}, error) {
-		return c.doFetchOrders(ctx, apiKey, date, limit, countrySuffix)
+		return c.doFetchOrders(ctx, apiKey, date, limit, countrySuffix, dateUtil)
 	})
 
 	if err != nil {
@@ -234,6 +244,7 @@ func (c *DropiClient) FetchAllOrders(
 	apiKey string,
 	date string,
 	countrySuffix string,
+	dateUtil string,
 ) ([]models.DropiOrder, error) {
 	const pageSize = 50
 	var allOrders []models.DropiOrder
@@ -252,7 +263,7 @@ func (c *DropiClient) FetchAllOrders(
 		default:
 		}
 
-		orders, err := c.FetchOrders(ctx, apiKey, date, pageSize, countrySuffix)
+		orders, err := c.FetchOrders(ctx, apiKey, date, pageSize, countrySuffix, dateUtil)
 		if err != nil {
 			// Si es la primera página, retornar error
 			if page == 1 {
@@ -289,4 +300,3 @@ func (c *DropiClient) FetchAllOrders(
 
 	return allOrders, nil
 }
-
