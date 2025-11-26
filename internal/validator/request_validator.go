@@ -2,6 +2,7 @@ package validator
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -9,13 +10,26 @@ import (
 // RequestValidator validates request parameters for security and format compliance
 type RequestValidator struct {
 	countrySuffixRegex *regexp.Regexp
+	validCountries     map[string]bool
 }
 
 // NewRequestValidator creates a new RequestValidator instance
 func NewRequestValidator() *RequestValidator {
 	return &RequestValidator{
 		// Accepts: "co", "mx", "cl" (2 letters) or "py.com" (2 letters + dot + 2-3 letters)
-		countrySuffixRegex: regexp.MustCompile(`^[a-z]{2,3}\.[a-z]{2,3}$`),
+		countrySuffixRegex: regexp.MustCompile(`^(?:[a-z]{2}|com\.py)$`),
+		// Lista de países soportados por Dropi
+		validCountries: map[string]bool{
+			"co":     true, // Colombia
+			"mx":     true, // México
+			"cl":     true, // Chile
+			"ar":     true, // Argentina
+			"ec":     true, // Ecuador
+			"gt":     true, // Guatemala
+			"pa":     true, // Panamá
+			"com.py": true, // Paraguay (caso especial)
+			"pe":     true, // Perú
+		},
 	}
 }
 
@@ -24,9 +38,17 @@ func (v *RequestValidator) ValidateCountrySuffix(suffix string) error {
 	if suffix == "" {
 		return errors.New("dropi_country_suffix is required")
 	}
+
+	// Validar formato
 	if !v.countrySuffixRegex.MatchString(suffix) {
 		return errors.New("dropi_country_suffix must be 2 lowercase letters or special format (e.g., 'co', 'mx', 'py.com')")
 	}
+
+	// Validar que sea un país soportado
+	if !v.validCountries[suffix] {
+		return fmt.Errorf("dropi_country_suffix '%s' is not supported. Valid countries: co, mx, cl, ar, ec, gt, pa, py.com, pe", suffix)
+	}
+
 	return nil
 }
 

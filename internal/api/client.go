@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	apperrors "github.com/juancollazo-ch/dropi-order-status-service/internal/errors"
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/models"
 	"github.com/sony/gobreaker"
 	"go.uber.org/zap"
@@ -136,19 +137,18 @@ func (c *DropiClient) doFetchOrders(
 		return nil, fmt.Errorf("error building request: %w", err)
 	}
 
-	// Query params
-	// Query params base
-	queryParams := fmt.Sprintf(
-		"from=%s&result_number=%d&filter_date_by=%s",
-		date, limit, "FECHA%20DE%20CAMBIO%20DE%20ESTATUS",
-	)
+	// Construir query params usando url.Values (buenas prácticas)
+	queryParams := req.URL.Query()
+	queryParams.Set("from", date)
+	queryParams.Set("result_number", fmt.Sprintf("%d", limit))
+	queryParams.Set("filter_date_by", "FECHA DE CAMBIO DE ESTATUS")
 
-	// Agregar date_util si está presente
+	// Agregar date_util si está presente (según documentación: "untill" con doble 'l')
 	if dateUtil != "" {
-		queryParams += fmt.Sprintf("&until=%s", dateUtil)
+		queryParams.Set("until", dateUtil)
 	}
 
-	req.URL.RawQuery = queryParams
+	req.URL.RawQuery = queryParams.Encode()
 
 	zap.L().Info("calling dropi",
 		zap.String("url", req.URL.String()),
@@ -167,39 +167,100 @@ func (c *DropiClient) doFetchOrders(
 	}
 	defer resp.Body.Close()
 
-	// Manejo específico de códigos de error
+	// Manejo específico de códigos de error con errores estructurados
 	switch resp.StatusCode {
-	case 429:
-		// Rate limiting - error temporal
-		retryAfter := resp.Header.Get("Retry-After")
-		if retryAfter != "" {
-			zap.L().Warn("rate limited by Dropi",
-				zap.String("retry_after", retryAfter),
-				zap.String("country_suffix", countrySuffix),
-			)
-			return nil, fmt.Errorf("rate limited: retry after %s seconds", retryAfter)
-		}
-		return nil, fmt.Errorf("rate limited by Dropi API")
-
-	case 401, 403:
-		// Error de autenticación - error permanente
-		zap.L().Error("authentication failed",
-			zap.Int("status_code", resp.StatusCode),
-		)
-		return nil, fmt.Errorf("authentication error: invalid API key (status %d)", resp.StatusCode)
-
-	case 503:
-		// Service unavailable - error temporal
-		zap.L().Warn("dropi service unavailable",
-			zap.Int("status_code", resp.StatusCode),
-		)
-		return nil, fmt.Errorf("dropi service temporarily unavailable")
-
 	case 200, 201, 204:
 		// Success - continuar
+
+	case 400:
+		zap.L().Warn("bad request to Dropi API",
+			zap.Int("status_code", resp.StatusCode),
+			zap.String("country_suffix", countrySuffix),
+		)
+		return nil, apperrors.ErrBadRequest(
+			"Invalid request parameters",
+			fmt.Errorf("dropi API returned status %d", resp.StatusCode),
+		).WithMetadata("country_suffix", countrySuffix)
+
+	case 401:
+		zap.L().Error("authentication failed with Dropi API",
+			zap.Int("status_code", resp.StatusCode),
+			zap.String("country_suffix", countrySuffix),
+		)
+		return nil, apperrors.ErrUnauthorized(
+			"Invalid API key or authentication failed",
+			fmt.Errorf("dropi API returned status %d", resp.StatusCode),
+		).WithMetadata("country_suffix", countrySuffix)
+
+	case 403:
+		zap.L().Error("access forbidden by Dropi API",
+			zap.Int("status_code", resp.StatusCode),
+			zap.String("country_suffix", countrySuffix),
+		)
+		return nil, apperrors.ErrForbidden(
+			"Access denied to Dropi API",
+			fmt.Errorf("dropi API returned status %d", resp.StatusCode),
+		).WithMetadata("country_suffix", countrySuffix)
+
+	case 404:
+		zap.L().Warn("resource not found in Dropi API",
+			zap.Int("status_code", resp.StatusCode),
+			zap.String("country_suffix", countrySuffix),
+		)
+		return nil, apperrors.ErrNotFound(
+			"Orders not found for the specified criteria",
+			fmt.Errorf("dropi API returned status %d", resp.StatusCode),
+		).WithMetadata("country_suffix", countrySuffix)
+
+	case 429:
+		retryAfter := resp.Header.Get("Retry-After")
+		zap.L().Warn("rate limited by Dropi API",
+			zap.String("retry_after", retryAfter),
+			zap.String("country_suffix", countrySuffix),
+		)
+		appErr := apperrors.ErrRateLimited(
+			"Too many requests to Dropi API",
+			fmt.Errorf("dropi API returned status %d", resp.StatusCode),
+		).WithMetadata("country_suffix", countrySuffix)
+
+		if retryAfter != "" {
+			appErr.WithMetadata("retry_after", retryAfter)
+		}
+		return nil, appErr
+
+	case 503:
+		zap.L().Warn("Dropi API service unavailable",
+			zap.Int("status_code", resp.StatusCode),
+			zap.String("country_suffix", countrySuffix),
+		)
+		return nil, apperrors.ErrServiceUnavailable(
+			"Dropi API is temporarily unavailable",
+			fmt.Errorf("dropi API returned status %d", resp.StatusCode),
+		).WithMetadata("country_suffix", countrySuffix)
+
 	default:
+		if resp.StatusCode >= 500 {
+			zap.L().Error("Dropi API server error",
+				zap.Int("status_code", resp.StatusCode),
+				zap.String("country_suffix", countrySuffix),
+			)
+			return nil, apperrors.ErrExternalAPI(
+				resp.StatusCode,
+				fmt.Sprintf("Dropi API returned server error: %d", resp.StatusCode),
+				fmt.Errorf("dropi API returned status %d", resp.StatusCode),
+			).WithMetadata("country_suffix", countrySuffix)
+		}
+
 		if resp.StatusCode >= 400 {
-			return nil, fmt.Errorf("dropi error: status %d", resp.StatusCode)
+			zap.L().Warn("Dropi API client error",
+				zap.Int("status_code", resp.StatusCode),
+				zap.String("country_suffix", countrySuffix),
+			)
+			return nil, apperrors.ErrExternalAPI(
+				resp.StatusCode,
+				fmt.Sprintf("Dropi API returned client error: %d", resp.StatusCode),
+				fmt.Errorf("dropi API returned status %d", resp.StatusCode),
+			).WithMetadata("country_suffix", countrySuffix)
 		}
 	}
 
@@ -238,7 +299,6 @@ func (c *DropiClient) FetchOrders(
 }
 
 // FetchAllOrders obtiene todas las órdenes usando paginación automática
-// Útil cuando hay más de 50 órdenes en una fecha
 func (c *DropiClient) FetchAllOrders(
 	ctx context.Context,
 	apiKey string,
@@ -246,7 +306,7 @@ func (c *DropiClient) FetchAllOrders(
 	countrySuffix string,
 	dateUtil string,
 ) ([]models.DropiOrder, error) {
-	const pageSize = 50
+	const pageSize = 150
 	var allOrders []models.DropiOrder
 	page := 1
 	maxPages := 10 // Límite de seguridad para evitar loops infinitos

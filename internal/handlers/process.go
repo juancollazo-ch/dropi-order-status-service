@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	apperrors "github.com/juancollazo-ch/dropi-order-status-service/internal/errors"
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/models"
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/service"
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/validator"
@@ -57,12 +58,18 @@ func (h *ProcessHandler) ProcessOrders(w http.ResponseWriter, r *http.Request) {
 
 	// Validar parámetros dinámicos
 	if err := h.validator.ValidateRequest(&req); err != nil {
-		zap.L().Error("Request validation failed",
+		// Crear error estructurado para validación
+		validationErr := apperrors.ErrValidation(err.Error(), err).
+			WithMetadata("dropi_country_suffix", req.DropiCountrySuffix).
+			WithMetadata("webhook_suffix", req.WebhookSuffix)
+
+		zap.L().Warn("Request validation failed",
 			zap.Error(err),
 			zap.String("dropi_country_suffix", req.DropiCountrySuffix),
 			zap.String("webhook_suffix", req.WebhookSuffix),
 		)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+
+		h.handleError(w, validationErr)
 		return
 	}
 
@@ -82,8 +89,7 @@ func (h *ProcessHandler) ProcessOrders(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err != nil {
-		zap.L().Error("Processing error", zap.Error(err))
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		h.handleError(w, err)
 		return
 	}
 
@@ -96,4 +102,61 @@ func (h *ProcessHandler) ProcessOrders(w http.ResponseWriter, r *http.Request) {
 		zap.Int("webhooks_queued", result.WebhooksQueued),
 		zap.Bool("partial_timeout", result.PartialTimeout),
 	)
+}
+
+// handleError maneja errores de forma estructurada y responde con el código HTTP correcto
+func (h *ProcessHandler) handleError(w http.ResponseWriter, err error) {
+	// Intentar convertir a AppError
+	if appErr, ok := err.(*apperrors.AppError); ok {
+		// Log estructurado con metadata
+		logFields := []zap.Field{
+			zap.Int("status_code", appErr.StatusCode),
+			zap.Int("error_code", appErr.Code),
+			zap.String("message", appErr.Message),
+			zap.Bool("retryable", appErr.Retryable),
+		}
+
+		// Agregar metadata si existe
+		for key, value := range appErr.Metadata {
+			logFields = append(logFields, zap.Any(key, value))
+		}
+
+		// Log con severidad apropiada
+		if appErr.StatusCode >= 500 {
+			zap.L().Error("Server error", logFields...)
+		} else if appErr.StatusCode >= 400 {
+			zap.L().Warn("Client error", logFields...)
+		}
+
+		// Responder al cliente con el código correcto
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(appErr.StatusCode)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":      appErr.Code,
+				"message":   appErr.Message,
+				"details":   appErr.Details,
+				"retryable": appErr.Retryable,
+				"metadata":  appErr.Metadata,
+			},
+		})
+		return
+	}
+
+	// Error genérico (no estructurado)
+	zap.L().Error("Unhandled error",
+		zap.Error(err),
+		zap.String("error_type", "unstructured"),
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": map[string]interface{}{
+			"code":      50000,
+			"message":   "Internal server error",
+			"details":   err.Error(),
+			"retryable": true,
+		},
+	})
 }

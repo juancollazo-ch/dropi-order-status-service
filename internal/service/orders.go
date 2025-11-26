@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sync"
 
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/api"
@@ -59,22 +58,22 @@ func (s *OrderService) HandleOrderRequest(
 	dateUtil string,
 ) (*ProcessResult, error) {
 
-	logger := slog.With(
-		"country_suffix", countrySuffix,
-		"webhook_suffix", webhookSuffix,
-	)
-
 	// 1) Consultar Dropi con paginación automática
 	// Esto maneja automáticamente el caso de más de 50 órdenes
 	orders, err := s.client.FetchAllOrders(ctx, apiKey, date, countrySuffix, dateUtil)
 	if err != nil {
-		logger.Error("error fetching orders", "error", err)
+		zap.L().Error("error fetching orders",
+			zap.Error(err),
+			zap.String("country_suffix", countrySuffix),
+			zap.String("webhook_suffix", webhookSuffix),
+		)
 		return nil, err
 	}
 
-	logger.Info("orders fetched from Dropi",
-		"total_orders", len(orders),
-		"date", date,
+	zap.L().Info("orders fetched from Dropi",
+		zap.Int("total_orders", len(orders)),
+		zap.String("date", date),
+		zap.String("country_suffix", countrySuffix),
 	)
 
 	// Inicializar resultado
@@ -86,7 +85,10 @@ func (s *OrderService) HandleOrderRequest(
 
 	// Si no hay órdenes, retornar resultado vacío (no es un error)
 	if len(orders) == 0 {
-		logger.Info("no orders found for this date", "date", date)
+		zap.L().Info("no orders found for this date",
+			zap.String("date", date),
+			zap.String("country_suffix", countrySuffix),
+		)
 		return result, nil
 	}
 
@@ -103,9 +105,9 @@ func (s *OrderService) HandleOrderRequest(
 			// Esto permite que el cliente vea las órdenes procesadas hasta el momento
 			result.Errors = append(result.Errors, fmt.Sprintf("processing cancelled after %d orders: timeout", result.OrdersProcessed))
 			result.PartialTimeout = true
-			logger.Warn("partial timeout occurred",
-				"orders_processed", result.OrdersProcessed,
-				"orders_remaining", len(orders)-i,
+			zap.L().Warn("partial timeout occurred",
+				zap.Int("orders_processed", result.OrdersProcessed),
+				zap.Int("orders_remaining", len(orders)-i),
 			)
 			return result, nil // Retornar nil en vez de ctx.Err() para evitar 500
 		default:
@@ -116,15 +118,15 @@ func (s *OrderService) HandleOrderRequest(
 		result.OrdersProcessed++
 
 		// 2) Comparar estados
-		compareResult, err := compare.CompareOrderStatus(order, logger)
+		compareResult, err := compare.CompareOrderStatus(order)
 		if err != nil {
 			result.OrdersSkipped++
 			errMsg := fmt.Sprintf("Order %d: %s", order.ID, err.Error())
 			result.Errors = append(result.Errors, errMsg)
 
-			logger.Warn("order skipped (cannot compare status)",
-				"order_id", order.ID,
-				"error", err,
+			zap.L().Warn("order skipped (cannot compare status)",
+				zap.Int64("order_id", order.ID),
+				zap.Error(err),
 			)
 			continue
 		}
@@ -152,21 +154,13 @@ func (s *OrderService) HandleOrderRequest(
 				semaphore <- struct{}{}
 				defer func() { <-semaphore }()
 
-				zap.L().Info("sending webhook",
-					zap.Int64("order_id", orderID),
-					zap.String("webhook_suffix", suffix),
-				)
-
+				// El log detallado se hace en sender.go, aquí solo manejamos errores
 				if err := s.webhookSender.SendWebhook(order, suffix); err != nil {
 					zap.L().Error("webhook failed",
 						zap.Int64("order_id", orderID),
 						zap.Error(err),
 					)
 					webhookErrors <- fmt.Errorf("order %d: %w", orderID, err)
-				} else {
-					zap.L().Info("webhook sent successfully",
-						zap.Int64("order_id", orderID),
-					)
 				}
 			}(*order, webhookSuffix, order.ID)
 		}

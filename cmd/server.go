@@ -227,7 +227,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	resp := HealthResponse{
 		Status:  "healthy",
 		Service: "dropi-order-status-service",
-		Version: "1.0.0",
+		Version: "1.1.0",
 	}
 
 	w.Header().Set("Content-Type", "application/json")
