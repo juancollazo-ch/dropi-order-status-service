@@ -7,6 +7,7 @@ import (
 	"time"
 
 	apperrors "github.com/juancollazo-ch/dropi-order-status-service/internal/errors"
+	"github.com/juancollazo-ch/dropi-order-status-service/internal/logging"
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/models"
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/service"
 	"github.com/juancollazo-ch/dropi-order-status-service/internal/validator"
@@ -42,17 +43,25 @@ func (h *ProcessHandler) ProcessOrders(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
+	// Inyectar idWorkspace y flowNS en el contexto para logs posteriores
+	// Usar la función del nuevo paquete de logging
+	ctx = logging.WithLoggingFields(ctx, req.IDWorkspace, req.FlowNS)
+	logFields := logging.GetLoggingFieldsFromContext(ctx)
 
 	// Validate required fields
 	if req.APIKey == "" || req.Date == "" {
-		http.Error(w, "api_key and date are required", http.StatusBadRequest)
+		h.handleError(w, apperrors.ErrBadRequest("api_key and date are required", nil).
+			WithMetadata("id_workspace", req.IDWorkspace).
+			WithMetadata("flow_ns", req.FlowNS))
 		return
 	}
 
 	// Validar formato de fecha (YYYY-MM-DD)
 	if !validator.IsValidDate(req.Date) {
 		zap.L().Error("Invalid date format", zap.String("date", req.Date))
-		http.Error(w, "date must be in format YYYY-MM-DD", http.StatusBadRequest)
+		h.handleError(w, apperrors.ErrBadRequest("date must be in format YYYY-MM-DD", nil).
+			WithMetadata("id_workspace", req.IDWorkspace).
+			WithMetadata("flow_ns", req.FlowNS))
 		return
 	}
 
@@ -61,12 +70,16 @@ func (h *ProcessHandler) ProcessOrders(w http.ResponseWriter, r *http.Request) {
 		// Crear error estructurado para validación
 		validationErr := apperrors.ErrValidation(err.Error(), err).
 			WithMetadata("dropi_country_suffix", req.DropiCountrySuffix).
-			WithMetadata("webhook_suffix", req.WebhookSuffix)
+			WithMetadata("webhook_suffix", req.WebhookSuffix).
+			WithMetadata("id_workspace", req.IDWorkspace).
+			WithMetadata("flow_Ns", req.FlowNS)
 
 		zap.L().Warn("Request validation failed",
-			zap.Error(err),
-			zap.String("dropi_country_suffix", req.DropiCountrySuffix),
-			zap.String("webhook_suffix", req.WebhookSuffix),
+			append(logFields,
+				zap.Error(err),
+				zap.String("dropi_country_suffix", req.DropiCountrySuffix),
+				zap.String("webhook_suffix", req.WebhookSuffix),
+			)...,
 		)
 
 		h.handleError(w, validationErr)
@@ -74,9 +87,11 @@ func (h *ProcessHandler) ProcessOrders(w http.ResponseWriter, r *http.Request) {
 	}
 
 	zap.L().Info("Processing request",
-		zap.String("date", req.Date),
-		zap.String("dropi_country_suffix", req.DropiCountrySuffix),
-		zap.String("webhook_suffix", req.WebhookSuffix),
+		append(logFields,
+			zap.String("date", req.Date),
+			zap.String("dropi_country_suffix", req.DropiCountrySuffix),
+			zap.String("webhook_suffix", req.WebhookSuffix),
+		)...,
 	)
 
 	result, err := h.svc.HandleOrderRequest(
@@ -89,6 +104,7 @@ func (h *ProcessHandler) ProcessOrders(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err != nil {
+
 		h.handleError(w, err)
 		return
 	}
@@ -97,10 +113,12 @@ func (h *ProcessHandler) ProcessOrders(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 
 	zap.L().Info("Process completed successfully",
-		zap.Int("orders", result.TotalOrders),
-		zap.Int("changes", result.ChangesDetected),
-		zap.Int("webhooks_queued", result.WebhooksQueued),
-		zap.Bool("partial_timeout", result.PartialTimeout),
+		append(logFields,
+			zap.Int("orders", result.TotalOrders),
+			zap.Int("changes", result.ChangesDetected),
+			zap.Int("webhooks_queued", result.WebhooksQueued),
+			zap.Bool("partial_timeout", result.PartialTimeout),
+		)...,
 	)
 }
 

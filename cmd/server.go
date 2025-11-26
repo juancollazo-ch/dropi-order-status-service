@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,16 +20,12 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// -------------------------------------------------------
 // Context Keys (tipado seguro)
-// -------------------------------------------------------
 type contextKey string
 
 const traceIDKey contextKey = "trace_id"
 
-// -------------------------------------------------------
 // Convertir niveles de Zap a severidad de GCP Cloud Logging
-// -------------------------------------------------------
 func zapLevelToGCPSeverity(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	switch level {
 	case zapcore.DebugLevel:
@@ -47,12 +45,13 @@ func zapLevelToGCPSeverity(level zapcore.Level, enc zapcore.PrimitiveArrayEncode
 	}
 }
 
-// -------------------------------------------------------
 // MAIN: inicializa servidor, workers y dependencias
-// -------------------------------------------------------
 func main() {
 	// Inicializar Zap Logger con formato compatible con GCP Cloud Logging
 	config := zap.NewProductionConfig()
+
+	// Sembrar el generador de números aleatorios para el jitter en los reintentos
+	rand.Seed(time.Now().UnixNano()) //
 
 	// Configurar para Cloud Logging (JSON estructurado)
 	config.EncoderConfig.MessageKey = "message"
@@ -77,10 +76,7 @@ func main() {
 		port = "8080"
 	}
 
-	//
-	// -----------------------
 	// Inicializar dependencias
-	// -----------------------
 	dropiClient, err := api.NewDropiClient()
 	if err != nil {
 		zap.L().Error("Failed to start Dropi client", zap.Error(err))
@@ -92,10 +88,7 @@ func main() {
 	orderService := service.NewOrderService(dropiClient, webhookSender)
 	processHandler := handlers.NewProcessHandler(orderService)
 
-	//
-	// -----------------------
 	// HTTP ROUTES
-	// -----------------------
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/process", withLogging(processHandler.ProcessOrders))
@@ -108,10 +101,7 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	//
-	// -----------------------
 	// GRACEFUL SHUTDOWN
-	// -----------------------
 	go func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -138,9 +128,7 @@ func main() {
 	}
 }
 
-// -------------------------------------------------------
 // MIDDLEWARE: Logging con Trace ID compatible con GCP
-// -------------------------------------------------------
 func withLogging(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -151,20 +139,10 @@ func withLogging(next http.HandlerFunc) http.HandlerFunc {
 		if traceHeader != "" {
 			// Formato: TRACE_ID/SPAN_ID;o=TRACE_TRUE
 			// Solo necesitamos TRACE_ID
-			if idx := len(traceHeader); idx > 0 {
-				if slashIdx := 0; slashIdx < idx {
-					for i, c := range traceHeader {
-						if c == '/' {
-							slashIdx = i
-							break
-						}
-					}
-					if slashIdx > 0 {
-						traceID = traceHeader[:slashIdx]
-					} else {
-						traceID = traceHeader
-					}
-				}
+			if slashIdx := strings.IndexByte(traceHeader, '/'); slashIdx != -1 { //
+				traceID = traceHeader[:slashIdx]
+			} else {
+				traceID = traceHeader // No hay slash, asumir que todo el encabezado es el trace ID
 			}
 		}
 		if traceID == "" {
@@ -214,9 +192,7 @@ func withLogging(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------
 // HEALTH CHECK
-// -------------------------------------------------------
 type HealthResponse struct {
 	Status  string `json:"status"`
 	Service string `json:"service"`
@@ -227,7 +203,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	resp := HealthResponse{
 		Status:  "healthy",
 		Service: "dropi-order-status-service",
-		Version: "1.1.0",
+		Version: "1.2.0",
 	}
 
 	w.Header().Set("Content-Type", "application/json")

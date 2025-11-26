@@ -6,7 +6,10 @@ type ProcessRequest struct {
 	Date               string `json:"date"`
 	DropiCountrySuffix string `json:"dropi_country_suffix"`
 	WebhookSuffix      string `json:"webhook_suffix"`
-	DateUtil           string `json:"date_util,omitempty"` // Fecha adicional para filtrado
+	DateUtil           string `json:"date_util,omitempty"`
+
+	IDWorkspace string `json:"id_workspace,omitempty"`
+	FlowNS      string `json:"flow_ns,omitempty"`
 }
 
 // GetDropiCountrySuffix implementa la interfaz del validator
